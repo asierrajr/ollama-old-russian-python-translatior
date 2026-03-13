@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Translate Pavlov-era / pre-1918 Russian OCR text to English using Ollama.
+Translate Pavlov-era / pre-1918 Russian OCR text to a target language using Ollama.
 
 Features:
 - Optional normalization with Qwen before translation
 - Skip normalization entirely with --skip-normalization
 - Resume interrupted runs with --resume
-- Incremental writes to <filename>_en.txt after each completed chunk
+- Target language flags for code and prompt wording
+- Incremental writes to <filename>_<target>.txt after each completed chunk
 - Progress state in <filename>_progress.json
-- Detects summary / non-English outputs and retries automatically
+- Detects summary / wrong-language outputs and retries automatically
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from typing import Iterable, List
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_NORMALIZER_MODEL = "qwen3:30b"
 DEFAULT_TRANSLATOR_MODEL = "translategemma:12b"
+DEFAULT_TARGET_LANG_CODE = "en"
+DEFAULT_TARGET_LANG_NAME = "English"
 
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 SUMMARY_MARKERS = [
@@ -38,6 +41,26 @@ SUMMARY_MARKERS = [
     "я проанализировал",
     "предоставленный текст",
 ]
+
+CYRILLIC_TARGET_CODES = {
+    "ru", "ru-ru", "uk", "uk-ua", "be", "be-by", "bg", "bg-bg",
+    "sr", "sr-rs", "mk", "mk-mk", "kk", "ky", "mn", "tg"
+}
+CYRILLIC_TARGET_NAMES = {
+    "russian", "ukrainian", "belarusian", "bulgarian", "serbian",
+    "macedonian", "kazakh", "kyrgyz", "mongolian", "tajik"
+}
+
+
+def sanitize_lang_code(lang_code: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", lang_code.strip())
+    return cleaned or "translated"
+
+
+def target_language_uses_cyrillic(target_lang_code: str, target_lang_name: str) -> bool:
+    code = target_lang_code.strip().lower()
+    name = target_lang_name.strip().lower()
+    return code in CYRILLIC_TARGET_CODES or name in CYRILLIC_TARGET_NAMES
 
 
 def ts() -> str:
@@ -241,17 +264,20 @@ TEXT:
     )
 
 
-def looks_like_bad_translation(text: str) -> bool:
+def looks_like_bad_translation(
+    text: str,
+    target_lang_code: str = "en",
+    target_lang_name: str = "English",
+) -> bool:
     t = text.strip().lower()
 
     if not t:
         return True
 
-    cyr = len(CYRILLIC_RE.findall(text))
-    letters = len(re.findall(r"[A-Za-zА-Яа-яЁё]", text))
-    if letters and (cyr / letters) > 0.08:
-        return True
+    normalized_code = (target_lang_code or "").lower()
+    normalized_name = (target_lang_name or "").lower()
 
+    # Summary / analysis markers are always bad for this workflow.
     if any(marker in t for marker in SUMMARY_MARKERS):
         return True
 
@@ -262,23 +288,38 @@ def looks_like_bad_translation(text: str) -> bool:
     if bullet_lines >= 3:
         return True
 
+    # Only use the "too much Cyrillic" heuristic for non-Cyrillic targets.
+    cyrillic_targets = {
+        "ru", "ru-ru", "uk", "uk-ua", "bg", "bg-bg", "sr", "sr-rs", "mk", "mk-mk", "be", "be-by"
+    }
+    if normalized_code not in cyrillic_targets and "cyril" not in normalized_name:
+        cyr = len(CYRILLIC_RE.findall(text))
+        letters = len(re.findall(r"[A-Za-zА-Яа-яЁё]", text))
+        if letters and (cyr / letters) > 0.08:
+            return True
+
     return False
 
 
-def build_translation_prompt(text: str, retry: bool = False) -> str:
+def build_translation_prompt(
+    text: str,
+    target_lang_code: str = "en",
+    target_lang_name: str = "English",
+    retry: bool = False,
+) -> str:
     if not retry:
-        return f"""You are a professional Russian (ru) to English (en) translator.
-Your goal is to accurately convey the meaning and nuances of the original Russian text while adhering to English grammar, vocabulary, and cultural sensitivities.
-Produce only the English translation, without any additional explanations or commentary.
+        return f"""You are a professional Russian (ru) to {target_lang_name} ({target_lang_code}) translator.
+Your goal is to accurately convey the meaning and nuances of the original Russian text while adhering to {target_lang_name} grammar, vocabulary, and cultural sensitivities.
+Produce only the {target_lang_name} translation, without any additional explanations or commentary.
 Translate every line of the source. Do not summarize. Do not omit headings, numbers, dates, initials, or table-like lines.
 
-Please translate the following Russian text into English:
+Please translate the following Russian text into {target_lang_name}:
 
 {text}
 """
     return f"""You are a literal translation engine.
 
-Translate the Russian OCR text below into English.
+Translate the Russian OCR text below into {target_lang_name}.
 
 Rules:
 - Translate ALL content.
@@ -292,7 +333,7 @@ Rules:
 - Translate line-by-line whenever possible.
 - Do NOT omit repeated or awkward lines just because they look like OCR noise.
 - If a fragment is damaged by OCR, translate what is readable and keep unclear text in [unclear OCR].
-- Output English only.
+- Output {target_lang_name} only.
 
 SOURCE TEXT:
 <<<
@@ -308,9 +349,16 @@ def translate_once(
     temperature: float,
     keep_alive: str,
     timeout: int,
+    target_lang_code: str,
+    target_lang_name: str,
     retry_prompt: bool,
 ) -> str:
-    prompt = build_translation_prompt(text, retry=retry_prompt)
+    prompt = build_translation_prompt(
+        text,
+        target_lang_code=target_lang_code,
+        target_lang_name=target_lang_name,
+        retry=retry_prompt,
+    )
     temp = 0.0 if retry_prompt else temperature
     return ollama_generate(
         host,
@@ -330,18 +378,36 @@ def translate_russian_to_english(
     temperature: float,
     keep_alive: str,
     timeout: int,
+    target_lang_code: str,
+    target_lang_name: str,
 ) -> str:
     out = translate_once(
-        text, host, model, temperature, keep_alive, timeout, retry_prompt=False
+        text,
+        host,
+        model,
+        temperature,
+        keep_alive,
+        timeout,
+        target_lang_code,
+        target_lang_name,
+        retry_prompt=False,
     )
-    if not looks_like_bad_translation(out):
+    if not looks_like_bad_translation(out, target_lang_code, target_lang_name):
         return out.strip()
 
-    eprint("Detected summary / non-English output; retrying chunk with stricter prompt...")
+    eprint("Detected summary / wrong-language output; retrying chunk with stricter prompt...")
     out = translate_once(
-        text, host, model, 0.0, keep_alive, timeout, retry_prompt=True
+        text,
+        host,
+        model,
+        0.0,
+        keep_alive,
+        timeout,
+        target_lang_code,
+        target_lang_name,
+        retry_prompt=True,
     )
-    if not looks_like_bad_translation(out):
+    if not looks_like_bad_translation(out, target_lang_code, target_lang_name):
         return out.strip()
 
     eprint("Chunk still looked wrong; salvaging with smaller sub-chunks...")
@@ -350,22 +416,34 @@ def translate_russian_to_english(
     for sub_idx, sub in enumerate(subparts, start=1):
         eprint(f"  Salvage sub-chunk {sub_idx}/{len(subparts)}...")
         sub_out = translate_once(
-            sub, host, model, 0.0, keep_alive, timeout, retry_prompt=True
+            sub,
+            host,
+            model,
+            0.0,
+            keep_alive,
+            timeout,
+            target_lang_code,
+            target_lang_name,
+            retry_prompt=True,
         )
-        if looks_like_bad_translation(sub_out):
+        if looks_like_bad_translation(sub_out, target_lang_code, target_lang_name):
             raise RuntimeError(
-                "Model returned a summary / non-English output instead of a translation."
+                "Model returned a summary / wrong-language output instead of a translation."
             )
         english_parts.append(sub_out.strip())
     return "\n\n".join(english_parts).strip()
 
 
-def build_output_paths(input_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+def build_output_paths(
+    input_path: pathlib.Path,
+    target_lang_code: str,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     stem = input_path.stem
     parent = input_path.parent
+    lang_suffix = sanitize_lang_code(target_lang_code)
     return (
         parent / f"{stem}_normalized_ru.txt",
-        parent / f"{stem}_en.txt",
+        parent / f"{stem}_{lang_suffix}.txt",
         parent / f"{stem}_progress.json",
     )
 
@@ -377,6 +455,8 @@ def save_progress(
     chunk_chars: int,
     total_chunks: int,
     skip_normalization: bool,
+    target_lang_code: str,
+    target_lang_name: str,
     completed_chunks: int,
     normalized_chunks: List[str],
     english_chunks: List[str],
@@ -386,6 +466,8 @@ def save_progress(
         "chunk_chars": chunk_chars,
         "total_chunks": total_chunks,
         "skip_normalization": skip_normalization,
+        "target_lang_code": target_lang_code,
+        "target_lang_name": target_lang_name,
         "completed_chunks": completed_chunks,
         "normalized_chunks": normalized_chunks,
         "english_chunks": english_chunks,
@@ -407,6 +489,8 @@ def process_file(
     host: str,
     normalizer_model: str,
     translator_model: str,
+    target_lang_code: str,
+    target_lang_name: str,
     chunk_chars: int,
     temperature: float,
     keep_alive: str,
@@ -419,7 +503,7 @@ def process_file(
     if not source_text.strip():
         raise RuntimeError(f"Input file is empty: {input_path}")
 
-    normalized_path, english_path, progress_path = build_output_paths(input_path)
+    normalized_path, english_path, progress_path = build_output_paths(input_path, target_lang_code)
     chunks = split_into_chunks(source_text, chunk_chars)
     total = len(chunks)
     eprint(f"Loaded {input_path} ({len(source_text):,} chars) in {total} chunk(s).")
@@ -440,6 +524,10 @@ def process_file(
             raise RuntimeError("Progress file chunk size does not match current --chunk-chars.")
         if state.get("skip_normalization") != skip_normalization:
             raise RuntimeError("Progress file skip-normalization setting does not match current run.")
+        if state.get("target_lang_code") != target_lang_code:
+            raise RuntimeError("Progress file target language code does not match current run.")
+        if state.get("target_lang_name") != target_lang_name:
+            raise RuntimeError("Progress file target language name does not match current run.")
         if state.get("total_chunks") != total:
             raise RuntimeError("Progress file chunk layout does not match the current source text.")
         normalized_chunks = list(state.get("normalized_chunks", []))
@@ -484,6 +572,8 @@ def process_file(
             temperature,
             keep_alive,
             timeout,
+            target_lang_code,
+            target_lang_name,
         )
         english_chunks.append(english)
 
@@ -494,6 +584,8 @@ def process_file(
             chunk_chars=chunk_chars,
             total_chunks=total,
             skip_normalization=skip_normalization,
+            target_lang_code=target_lang_code,
+            target_lang_name=target_lang_name,
             completed_chunks=len(english_chunks),
             normalized_chunks=normalized_chunks,
             english_chunks=english_chunks,
@@ -517,7 +609,7 @@ def process_file(
 
 def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Translate Pavlov-era / pre-1918 Russian OCR text to English using Ollama."
+        description="Translate Pavlov-era / pre-1918 Russian OCR text to a target language using Ollama."
     )
     parser.add_argument("input_file", help="Path to the source .txt file")
     parser.add_argument(
@@ -533,7 +625,17 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument(
         "--translator-model",
         default=DEFAULT_TRANSLATOR_MODEL,
-        help=f"Model for English translation (default: {DEFAULT_TRANSLATOR_MODEL})",
+        help=f"Model for translation (default: {DEFAULT_TRANSLATOR_MODEL})",
+    )
+    parser.add_argument(
+        "--target-lang-code",
+        default=DEFAULT_TARGET_LANG_CODE,
+        help=f"Target language code for translation (default: {DEFAULT_TARGET_LANG_CODE})",
+    )
+    parser.add_argument(
+        "--target-lang-name",
+        default=DEFAULT_TARGET_LANG_NAME,
+        help=f"Target language name for translation prompts (default: {DEFAULT_TARGET_LANG_NAME})",
     )
     parser.add_argument(
         "--chunk-chars",
@@ -593,6 +695,8 @@ def main(argv: Iterable[str]) -> int:
             host=args.host,
             normalizer_model=args.normalizer_model,
             translator_model=args.translator_model,
+            target_lang_code=args.target_lang_code,
+            target_lang_name=args.target_lang_name,
             chunk_chars=args.chunk_chars,
             temperature=args.temperature,
             keep_alive=args.keep_alive,
@@ -612,7 +716,7 @@ def main(argv: Iterable[str]) -> int:
 
     elapsed = time.time() - start
     print(f"Done in {elapsed:.1f}s")
-    print(f"English output: {english_path}")
+    print(f"Translated output: {english_path}")
     if normalized_path is not None:
         print(f"Normalized Russian: {normalized_path}")
     return 0
