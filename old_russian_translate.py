@@ -437,15 +437,21 @@ def translate_russian_to_english(
 def build_output_paths(
     input_path: pathlib.Path,
     target_lang_code: str,
+    output_dir: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     stem = input_path.stem
-    parent = input_path.parent
+    parent = output_dir if output_dir is not None else input_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
     lang_suffix = sanitize_lang_code(target_lang_code)
     return (
         parent / f"{stem}_normalized_ru.txt",
         parent / f"{stem}_{lang_suffix}.txt",
         parent / f"{stem}_progress.json",
     )
+
+
+def list_text_files(input_dir: pathlib.Path) -> List[pathlib.Path]:
+    return [path for path in sorted(input_dir.glob("*.txt")) if path.is_file()]
 
 
 def save_progress(
@@ -498,12 +504,13 @@ def process_file(
     save_normalized: bool,
     skip_normalization: bool,
     resume: bool,
+    output_dir: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, pathlib.Path | None]:
     source_text = read_text_file(input_path)
     if not source_text.strip():
         raise RuntimeError(f"Input file is empty: {input_path}")
 
-    normalized_path, english_path, progress_path = build_output_paths(input_path, target_lang_code)
+    normalized_path, english_path, progress_path = build_output_paths(input_path, target_lang_code, output_dir)
     chunks = split_into_chunks(source_text, chunk_chars)
     total = len(chunks)
     eprint(f"Loaded {input_path} ({len(source_text):,} chars) in {total} chunk(s).")
@@ -611,7 +618,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Translate Pavlov-era / pre-1918 Russian OCR text to a target language using Ollama."
     )
-    parser.add_argument("input_file", help="Path to the source .txt file")
+    parser.add_argument("input_file", help="Path to a source .txt file or a directory containing .txt files")
     parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
@@ -683,12 +690,68 @@ def main(argv: Iterable[str]) -> int:
     input_path = pathlib.Path(args.input_file).expanduser().resolve()
 
     if not input_path.exists():
-        eprint(f"Input file does not exist: {input_path}")
+        eprint(f"Input path does not exist: {input_path}")
         return 2
+
+    start = time.time()
+
+    if input_path.is_dir():
+        files = list_text_files(input_path)
+        if not files:
+            eprint(f"No .txt files found in: {input_path}")
+            return 2
+
+        translated_dir = input_path / "translated"
+        translated_dir.mkdir(parents=True, exist_ok=True)
+        eprint(f"Found {len(files)} .txt file(s) in {input_path}. Writing outputs to {translated_dir}")
+
+        successes: List[tuple[pathlib.Path, pathlib.Path, pathlib.Path | None]] = []
+        failures: List[tuple[pathlib.Path, str]] = []
+
+        for file_idx, file_path in enumerate(files, start=1):
+            eprint(f"[file {file_idx}/{len(files)}] Processing {file_path.name}...")
+            try:
+                english_path, normalized_path = process_file(
+                    input_path=file_path,
+                    host=args.host,
+                    normalizer_model=args.normalizer_model,
+                    translator_model=args.translator_model,
+                    target_lang_code=args.target_lang_code,
+                    target_lang_name=args.target_lang_name,
+                    chunk_chars=args.chunk_chars,
+                    temperature=args.temperature,
+                    keep_alive=args.keep_alive,
+                    timeout=args.timeout,
+                    save_normalized=args.save_normalized,
+                    skip_normalization=args.skip_normalization,
+                    resume=args.resume,
+                    output_dir=translated_dir,
+                )
+                successes.append((file_path, english_path, normalized_path))
+            except KeyboardInterrupt:
+                eprint("Interrupted by user.")
+                eprint("Tip: rerun with --resume to continue from the last completed chunk.")
+                return 130
+            except Exception as exc:
+                failures.append((file_path, str(exc)))
+                eprint(f"Error in {file_path.name}: {exc}")
+                continue
+
+        elapsed = time.time() - start
+        print(f"Done in {elapsed:.1f}s")
+        print(f"Translated directory: {translated_dir}")
+        print(f"Succeeded: {len(successes)}")
+        print(f"Failed: {len(failures)}")
+        if failures:
+            print("Failed files:")
+            for file_path, message in failures:
+                print(f"- {file_path.name}: {message}")
+            return 1
+        return 0
+
     if input_path.suffix.lower() != ".txt":
         eprint("Warning: input file is not .txt; continuing anyway.")
 
-    start = time.time()
     try:
         english_path, normalized_path = process_file(
             input_path=input_path,
@@ -704,6 +767,7 @@ def main(argv: Iterable[str]) -> int:
             save_normalized=args.save_normalized,
             skip_normalization=args.skip_normalization,
             resume=args.resume,
+            output_dir=None,
         )
     except KeyboardInterrupt:
         eprint("Interrupted by user.")
