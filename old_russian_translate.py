@@ -434,6 +434,67 @@ def translate_russian_to_english(
     return "\n\n".join(english_parts).strip()
 
 
+
+
+def translate_with_optional_normalize_on_failure(
+    text: str,
+    host: str,
+    normalizer_model: str,
+    translator_model: str,
+    temperature: float,
+    keep_alive: str,
+    timeout: int,
+    target_lang_code: str,
+    target_lang_name: str,
+    normalize_on_failure: bool,
+) -> tuple[str, str | None]:
+    try:
+        english = translate_russian_to_english(
+            text,
+            host,
+            translator_model,
+            temperature,
+            keep_alive,
+            timeout,
+            target_lang_code,
+            target_lang_name,
+        )
+        return english, None
+    except RuntimeError as exc:
+        if not normalize_on_failure or "summary / wrong-language output" not in str(exc):
+            raise
+
+        eprint("Chunk failed translation; normalizing only this chunk and retrying translation...")
+        normalized = normalize_old_russian(
+            text,
+            host,
+            normalizer_model,
+            temperature,
+            keep_alive,
+            timeout,
+        )
+        english = translate_russian_to_english(
+            normalized,
+            host,
+            translator_model,
+            temperature,
+            keep_alive,
+            timeout,
+            target_lang_code,
+            target_lang_name,
+        )
+        return english, normalized
+
+
+
+def build_failed_chunk_block(chunk_index: int, reason: str, original_text: str) -> str:
+    return f"""[FAILED CHUNK {chunk_index} - ORIGINAL OCR KEPT]
+[Reason: {reason}]
+[Manual review recommended]
+
+{original_text}
+""".strip()
+
 def build_output_paths(
     input_path: pathlib.Path,
     target_lang_code: str,
@@ -461,6 +522,8 @@ def save_progress(
     chunk_chars: int,
     total_chunks: int,
     skip_normalization: bool,
+    normalize_on_failure: bool,
+    continue_on_failure: bool,
     target_lang_code: str,
     target_lang_name: str,
     completed_chunks: int,
@@ -472,6 +535,8 @@ def save_progress(
         "chunk_chars": chunk_chars,
         "total_chunks": total_chunks,
         "skip_normalization": skip_normalization,
+        "normalize_on_failure": normalize_on_failure,
+        "continue_on_failure": continue_on_failure,
         "target_lang_code": target_lang_code,
         "target_lang_name": target_lang_name,
         "completed_chunks": completed_chunks,
@@ -503,6 +568,8 @@ def process_file(
     timeout: int,
     save_normalized: bool,
     skip_normalization: bool,
+    normalize_on_failure: bool,
+    continue_on_failure: bool,
     resume: bool,
     output_dir: pathlib.Path | None = None,
 ) -> tuple[pathlib.Path, pathlib.Path | None]:
@@ -531,6 +598,10 @@ def process_file(
             raise RuntimeError("Progress file chunk size does not match current --chunk-chars.")
         if state.get("skip_normalization") != skip_normalization:
             raise RuntimeError("Progress file skip-normalization setting does not match current run.")
+        if state.get("normalize_on_failure", False) != normalize_on_failure:
+            raise RuntimeError("Progress file normalize-on-failure setting does not match current run.")
+        if state.get("continue_on_failure", False) != continue_on_failure:
+            raise RuntimeError("Progress file continue-on-failure setting does not match current run.")
         if state.get("target_lang_code") != target_lang_code:
             raise RuntimeError("Progress file target language code does not match current run.")
         if state.get("target_lang_name") != target_lang_name:
@@ -552,45 +623,74 @@ def process_file(
         human_idx = idx + 1
         chunk = chunks[idx]
 
-        if skip_normalization:
-            normalized = chunk
-            normalized_chunks.append(normalized)
-            eprint(f"[{human_idx}/{total}] Skipping normalization; translating source text with {translator_model}...")
-        else:
-            eprint(f"[{human_idx}/{total}] Normalizing old Russian with {normalizer_model}...")
-            normalized = normalize_old_russian(
-                chunk,
-                host,
-                normalizer_model,
-                temperature,
-                keep_alive,
-                timeout,
-            )
-            normalized_chunks.append(normalized)
-            if save_normalized:
-                write_text_file(normalized_path, "\n\n".join(normalized_chunks).strip())
+        try:
+            if skip_normalization:
+                eprint(f"[{human_idx}/{total}] Skipping normalization; translating source text with {translator_model}...")
+                english, normalized_fallback = translate_with_optional_normalize_on_failure(
+                    chunk,
+                    host,
+                    normalizer_model,
+                    translator_model,
+                    temperature,
+                    keep_alive,
+                    timeout,
+                    target_lang_code,
+                    target_lang_name,
+                    normalize_on_failure,
+                )
+                normalized_chunks.append(normalized_fallback if normalized_fallback is not None else chunk)
+            else:
+                eprint(f"[{human_idx}/{total}] Normalizing old Russian with {normalizer_model}...")
+                normalized = normalize_old_russian(
+                    chunk,
+                    host,
+                    normalizer_model,
+                    temperature,
+                    keep_alive,
+                    timeout,
+                )
+                normalized_chunks.append(normalized)
+                if save_normalized:
+                    write_text_file(normalized_path, "\n\n".join(normalized_chunks).strip())
 
-            eprint(f"[{human_idx}/{total}] Translating to English with {translator_model}...")
+                eprint(f"[{human_idx}/{total}] Translating to {target_lang_name} with {translator_model}...")
+                english, _ = translate_with_optional_normalize_on_failure(
+                    normalized,
+                    host,
+                    normalizer_model,
+                    translator_model,
+                    temperature,
+                    keep_alive,
+                    timeout,
+                    target_lang_code,
+                    target_lang_name,
+                    False,
+                )
+        except Exception as exc:
+            if not continue_on_failure:
+                raise
+            eprint(f"[{human_idx}/{total}] Translation failed after retries; preserving original OCR and continuing...")
+            if skip_normalization:
+                normalized_chunks.append(chunk)
+            else:
+                # If normalization itself failed before appending, preserve the original chunk.
+                if len(normalized_chunks) < human_idx:
+                    normalized_chunks.append(chunk)
+            english = build_failed_chunk_block(human_idx, str(exc), chunk)
 
-        english = translate_russian_to_english(
-            normalized,
-            host,
-            translator_model,
-            temperature,
-            keep_alive,
-            timeout,
-            target_lang_code,
-            target_lang_name,
-        )
         english_chunks.append(english)
 
         write_text_file(english_path, "\n\n".join(english_chunks).strip())
+        if save_normalized and normalized_chunks:
+            write_text_file(normalized_path, "\n\n".join(normalized_chunks).strip())
         save_progress(
             progress_path,
             input_file=str(input_path),
             chunk_chars=chunk_chars,
             total_chunks=total,
             skip_normalization=skip_normalization,
+            normalize_on_failure=normalize_on_failure,
+            continue_on_failure=continue_on_failure,
             target_lang_code=target_lang_code,
             target_lang_name=target_lang_name,
             completed_chunks=len(english_chunks),
@@ -601,7 +701,7 @@ def process_file(
     normalized_text = "\n\n".join(normalized_chunks).strip()
     english_text = "\n\n".join(english_chunks).strip()
 
-    if save_normalized and not skip_normalization:
+    if save_normalized and normalized_chunks:
         write_text_file(normalized_path, normalized_text)
         eprint(f"Wrote normalized Russian: {normalized_path}")
     else:
@@ -682,6 +782,16 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         action="store_true",
         help="Skip Qwen normalization and translate the source OCR text directly to English",
     )
+    parser.add_argument(
+        "--normalize-on-failure",
+        action="store_true",
+        help="When a chunk fails translation validation, normalize only that failed chunk and retry translation",
+    )
+    parser.add_argument(
+        "--continue-on-failure",
+        action="store_true",
+        help="If a chunk still fails after retries, keep the original OCR for that chunk in the output and continue",
+    )
     return parser.parse_args(list(argv))
 
 
@@ -724,6 +834,8 @@ def main(argv: Iterable[str]) -> int:
                     timeout=args.timeout,
                     save_normalized=args.save_normalized,
                     skip_normalization=args.skip_normalization,
+                    normalize_on_failure=args.normalize_on_failure,
+                    continue_on_failure=args.continue_on_failure,
                     resume=args.resume,
                     output_dir=translated_dir,
                 )
@@ -766,6 +878,8 @@ def main(argv: Iterable[str]) -> int:
             timeout=args.timeout,
             save_normalized=args.save_normalized,
             skip_normalization=args.skip_normalization,
+            normalize_on_failure=args.normalize_on_failure,
+            continue_on_failure=args.continue_on_failure,
             resume=args.resume,
             output_dir=None,
         )
