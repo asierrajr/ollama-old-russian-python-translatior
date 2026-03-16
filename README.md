@@ -32,13 +32,13 @@ ollama pull translategemma:12b
 Single file to English:
 
 ```bash
-python old_russian_translate_patched_v5.py ./document.txt --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./document.txt --target-lang-code en --target-lang-name English
 ```
 
 Directory of `.txt` files to English:
 
 ```bash
-python old_russian_translate_patched_v5.py ./ocr_texts --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./ocr_texts --target-lang-code en --target-lang-name English
 ```
 
 ## What it outputs
@@ -147,43 +147,43 @@ Important:
 ### 1) Single file, English output
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --target-lang-code en --target-lang-name English
 ```
 
 ### 2) Single file, skip normalization
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --skip-normalization --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --skip-normalization --target-lang-code en --target-lang-name English
 ```
 
 ### 3) Single file, save normalized Russian too
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --save-normalized --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --save-normalized --target-lang-code en --target-lang-name English
 ```
 
 ### 4) Resume an interrupted run
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --resume --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --resume --target-lang-code en --target-lang-name English
 ```
 
 ### 5) Use smaller chunks for messy OCR
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --chunk-chars 1500 --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --chunk-chars 1500 --target-lang-code en --target-lang-name English
 ```
 
 ### 6) Use a lighter translator model
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --translator-model translategemma:4b --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --translator-model translategemma:4b --target-lang-code en --target-lang-name English
 ```
 
 ### 7) Translate to French
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --target-lang-code fr --target-lang-name French
+python old_russian_translate.py ./paper.txt --target-lang-code fr --target-lang-name French
 ```
 
 Output:
@@ -195,7 +195,7 @@ paper_fr.txt
 ### 8) Translate to Brazilian Portuguese
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --target-lang-code pt-BR --target-lang-name "Brazilian Portuguese"
+python old_russian_translate.py ./paper.txt --target-lang-code pt-BR --target-lang-name "Brazilian Portuguese"
 ```
 
 Output:
@@ -207,7 +207,7 @@ paper_pt-BR.txt
 ### 9) Translate all `.txt` files in a directory
 
 ```bash
-python old_russian_translate_patched_v5.py ./ocr_texts --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./ocr_texts --target-lang-code en --target-lang-name English
 ```
 
 Outputs go to:
@@ -219,7 +219,7 @@ Outputs go to:
 ### 10) Directory mode with resume and skip-normalization
 
 ```bash
-python old_russian_translate_patched_v5.py ./ocr_texts --resume --skip-normalization --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./ocr_texts --resume --skip-normalization --target-lang-code en --target-lang-name English
 ```
 
 ## Notes
@@ -239,11 +239,11 @@ python old_russian_translate_patched_v5.py ./ocr_texts --resume --skip-normaliza
 Fastest / lighter run on a laptop:
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --skip-normalization --translator-model translategemma:4b --chunk-chars 1500 --timeout 7200 --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --skip-normalization --translator-model translategemma:4b --chunk-chars 1500 --timeout 7200 --target-lang-code en --target-lang-name English
 ```
 
 Higher-quality run:
 
 ```bash
-python old_russian_translate_patched_v5.py ./paper.txt --translator-model translategemma:12b --chunk-chars 3000 --timeout 7200 --target-lang-code en --target-lang-name English
+python old_russian_translate.py ./paper.txt --translator-model translategemma:12b --chunk-chars 3000 --timeout 7200 --target-lang-code en --target-lang-name English
 ```
